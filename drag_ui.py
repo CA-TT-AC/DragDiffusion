@@ -92,6 +92,7 @@ with gr.Blocks() as demo:
                         "gsdf/Counterfeit-V2.5",
                         "stablediffusionapi/anything-v5",
                         "SG161222/Realistic_Vision_V2.0",
+                        "MVDream/sd-v2.1-base-4view"
                     ] + local_models_choice
                 )
                 vae_path = gr.Dropdown(value="default",
