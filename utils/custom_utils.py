@@ -156,8 +156,6 @@ def drag_diffusion_update(model,
                     f1_patch.append(ans.reshape((-1)))
                 f0_patch = torch.cat(f0_patch, dim=0)
                 f1_patch = torch.cat(f1_patch, dim=0)
-                print(f0_patch.shape)
-                print(f1_patch.shape)
                 # f0_patch = F1[:,:,r1:r2, c1:c2].detach()
                 # f1_patch = interpolate_feature_patch(F1,r1+di[0],r2+di[0],c1+di[1],c2+di[1])
 

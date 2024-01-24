@@ -37,6 +37,7 @@ def point_tracking(F0,
             F1_neighbor = F1[:, :, r1:r2, c1:c2]
             all_dist = (f0.unsqueeze(dim=-1).unsqueeze(dim=-1) - F1_neighbor).abs().sum(dim=1)
             all_dist = all_dist.squeeze(dim=0)
+            print(all_dist)
             row, col = divmod(all_dist.argmin().item(), all_dist.shape[-1])
             # handle_points[i][0] = pi[0] - args.r_p + row
             # handle_points[i][1] = pi[1] - args.r_p + col
@@ -103,6 +104,7 @@ def drag_diffusion_update(model,
 
     # prepare for point tracking and background regularization
     handle_points_init = copy.deepcopy(handle_points)
+    print("input mask shape:", mask.shape)
     interp_mask = F.interpolate(mask, (init_code.shape[2],init_code.shape[3]), mode='nearest')
     using_mask = interp_mask.sum() != 0.0
 
@@ -151,7 +153,7 @@ def drag_diffusion_update(model,
             # loss += args.lam * ((init_code_orig-init_code)*(1.0-interp_mask)).abs().sum()
             print('loss total=%f'%(loss.item()))
 
-        scaler.scale(loss).backward()
+        scaler.scale(loss).backward(retain_graph=True)
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad()
