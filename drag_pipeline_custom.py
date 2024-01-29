@@ -450,7 +450,7 @@ class MVDreamPipeline(DiffusionPipeline):
         dtype = next(self.image_encoder.parameters()).dtype
 
     #     image = torch.from_numpy(image).unsqueeze(0).permute(0, 3, 1, 2).to(device=device) # [1, 3, H, W]
-    #     image = 2 * image - 1
+        # image = 2 * image - 1
         image = F.interpolate(image, (256, 256), mode='bilinear', align_corners=False)
         image = image.to(dtype=dtype)
 
@@ -603,6 +603,121 @@ class MVDreamPipeline(DiffusionPipeline):
 
         return image
 
+    @torch.no_grad()
+    def latent2image(self, latents, return_type='np'):
+        latents = 1 / 0.18215 * latents.detach()
+        image = self.vae.decode(latents)['sample']
+        if return_type == 'np':
+            image = (image / 2 + 0.5).clamp(0, 1)
+            image = image.cpu().permute(0, 2, 3, 1).numpy()[0]
+            image = (image * 255).astype(np.uint8)
+        elif return_type == "pt":
+            image = (image / 2 + 0.5).clamp(0, 1)
+
+        return image
+    @torch.no_grad()
+    def decoder(
+        self,
+        prompt: str = "",
+        text_embeddings: str = "",
+        image: Optional[np.ndarray] = None,
+        latents: torch.tensor = None,
+        height: int = 256,
+        width: int = 256,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 7.0,
+        negative_prompt: str = "",
+        num_images_per_prompt: int = 1,
+        eta: float = 0.0,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        output_type: Optional[str] = "numpy", # pil, numpy, latents
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: int = 1,
+        num_frames: int = 4,
+        device=torch.device("cuda:0"),
+    ):
+        self.unet = self.unet.to(device=device)
+        self.vae = self.vae.to(device=device)
+        # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
+        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+        # corresponds to doing no classifier free guidance.
+        do_classifier_free_guidance = guidance_scale > 1.0
+
+        # Prepare timesteps
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.scheduler.timesteps
+        DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+        # Prepare extra step kwargs.
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+        actual_num_frames = num_frames
+
+        # Denoising loop
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                # expand the latents if we are doing classifier free guidance
+                multiplier = 2 if do_classifier_free_guidance else 1
+                latent_model_input = torch.cat([latents] * multiplier)
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+                unet_inputs = {
+                    'x': latent_model_input,
+                    'timesteps': torch.tensor([t] * actual_num_frames * multiplier, dtype=latent_model_input.dtype, device=device),
+                    'context': text_embeddings,
+                    'num_frames': actual_num_frames,
+                    'camera': torch.cat([self.camera] * multiplier),
+                }
+                if i==0:
+                    print("inversion_shape:")
+                    print('x:',unet_inputs['x'].shape)
+                    print("timesteps:", unet_inputs['timesteps'].shape)
+                    print("text:", text_embeddings.shape)
+                    print("camera:", unet_inputs['camera'].shape)
+                # if image is not None:
+                #     unet_inputs['ip'] = torch.cat([image_embeds_neg] * actual_num_frames + [image_embeds_pos] * actual_num_frames)
+                #     unet_inputs['ip_img'] = torch.cat([image_latents_neg] + [image_latents_pos]) # no repeat
+                
+                # predict the noise residual
+                noise_pred = self.unet.forward(**unet_inputs)
+
+                # perform guidance
+                if do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    
+                    noise_pred = noise_pred_uncond + guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
+
+                # compute the previous noisy sample x_t -> x_t-1
+                latents: torch.Tensor = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                )[0]
+
+                # call the callback, if provided
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        callback(i, t, latents)  # type: ignore
+
+        # Post-processing
+        if output_type == "latent":
+            image = latents
+        elif output_type == "pil":
+            image = self.decode_latents(latents)
+            image = self.numpy_to_pil(image)
+        else: # numpy
+            image = self.decode_latents(latents)
+
+        # Offload last model to CPU
+        if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
+            self.final_offload_hook.offload()
+
+        return image
+    
+    
     def forward_unet_features(self, z, t, encoder_hidden_states, layer_idx=[0], interp_res_h=256, interp_res_w=256):
         # unet_output, all_intermediate_features = self.unet(
         #     z,
@@ -748,12 +863,12 @@ class MVDreamPipeline(DiffusionPipeline):
             self.camera = get_camera(4, elevation=15, extra_view=False).to(dtype=latents.dtype, device=DEVICE)
             if i==0:
                 print("inversion_shape:")
-                print(model_inputs.shape)
+                print(latent_model_input.shape)
                 print(torch.tensor([t] * batch_size * multiplier, dtype=latent_model_input.dtype, device=DEVICE).shape)
                 print(text_embeddings.shape)
                 print(torch.cat([self.camera] * multiplier).shape)
             unet_inputs = {
-                'x': model_inputs,
+                'x': latent_model_input,
                 'timesteps': torch.tensor([t] * batch_size * multiplier, dtype=latent_model_input.dtype, device=DEVICE),
                 'context': text_embeddings,
                 'num_frames': 4,
