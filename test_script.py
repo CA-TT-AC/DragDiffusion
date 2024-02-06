@@ -29,15 +29,15 @@ def load_and_preprocess_images(folder_path, device):
     return processed_images
 
 # Example usage
-folder_path = '/data22/DISCOVER_summer2023/shenst2306/drag_diff2/DragDiffusion/data/mvdream_output2'
+folder_path = '/data22/DISCOVER_summer2023/shenst2306/drag_diff2/DragDiffusion/data/mvdream_output'
 ckpt_dir = '/data22/DISCOVER_summer2023/shenst2306/.cache/huggingface/hub/models--MVDream--MVDream/snapshots/d14ac9d78c48c266005729f2d5633f6c265da467/sd-v2.1-base-4view.pt'
 config_dir = '/data22/DISCOVER_summer2023/shenst2306/drag_diff2/MVDream/mvdream/configs/sd-v2-base.yaml'
 lora_path = ""
 
 device = 'cuda'
-prompt = 'a green chair'
+prompt = 'Head of Hatsune Miku'
 # prompt = ''
-inversion_strength = 0.7
+inversion_strength = 1.0
 latent_lr = 0.01
 n_pix_step = 80
 lam = 0.1
@@ -46,7 +46,7 @@ args.prompt = prompt
 # args.points = points
 args.n_inference_step = 50
 args.n_actual_inference_step = round(inversion_strength * args.n_inference_step)
-args.guidance_scale = 7.0
+args.guidance_scale = 1.1
 
 args.unet_feature_idx = [3]
 
@@ -106,9 +106,9 @@ mask = torch.ones_like(source_images[0, 0, :, :])
 mask = rearrange(mask, "h w -> 1 1 h w").cuda()
 handle_points = torch.tensor([[[106., 90.]]]*4) // 2
 target_points = torch.tensor([[[108., 116.]]]*4) // 2
-# updated_init_code = drag_diffusion_update(model, init_code,
-#     text_embeddings, t, handle_points, target_points, mask, args)
-updated_init_code = init_code
+updated_init_code = drag_diffusion_update(model, init_code,
+    text_embeddings, t, handle_points, target_points, mask, args)
+# updated_init_code = init_code
 print(updated_init_code.shape)
 print("finish update!")
 # updated_init_code = updated_init_code.half()
@@ -129,8 +129,8 @@ scaled_text_embedding = torch.cat([text_embeddings[:4,:,:],text_embeddings[:4,:,
 # inference the synthesized image
 gen_image = model.decoder(
     prompt=args.prompt,
-    text_embeddings=text_embeddings,
-    latents=init_code,
+    text_embeddings=scaled_text_embedding,
+    latents=torch.cat([init_code_orig, updated_init_code], dim=0),
     output_type="pil",
     guidance_scale=args.guidance_scale,
     num_inference_steps=args.n_inference_step,

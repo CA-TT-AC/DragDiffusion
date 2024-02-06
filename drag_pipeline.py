@@ -362,7 +362,7 @@ class DragPipeline(StableDiffusionPipeline):
             unconditional_embeddings = self.get_text_embeddings([uc_text]*batch_size)
             text_embeddings = torch.cat([unconditional_embeddings, text_embeddings], dim=0)
 
-        print("latents shape: ", latents.shape)
+        print("latents shape1: ", latents.shape)
         # iterative sampling
         self.scheduler.set_timesteps(num_inference_steps)
         # print("Valid timesteps: ", reversed(self.scheduler.timesteps))
@@ -388,7 +388,7 @@ class DragPipeline(StableDiffusionPipeline):
             latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
             if return_intermediates:
                 latents_list.append(latents)
-
+        print("latents shape2: ", latents.shape)
         image = self.latent2image(latents, return_type="pt")
         if return_intermediates:
             return image, latents_list

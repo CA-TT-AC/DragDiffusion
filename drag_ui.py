@@ -82,7 +82,7 @@ with gr.Blocks() as demo:
 
         with gr.Tab("Base Model Config"):
             with gr.Row():
-                local_models_dir = 'local_pretrained_models'
+                local_models_dir = '/data22/DISCOVER_summer2023/shenst2306/.cache/huggingface/hub/models--MVDream--MVDream/snapshots/d14ac9d78c48c266005729f2d5633f6c265da467'
                 local_models_choice = \
                     [os.path.join(local_models_dir,d) for d in os.listdir(local_models_dir) if os.path.isdir(os.path.join(local_models_dir,d))]
                 model_path = gr.Dropdown(value="runwayml/stable-diffusion-v1-5",

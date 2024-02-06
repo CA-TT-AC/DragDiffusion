@@ -663,10 +663,10 @@ class MVDreamPipeline(DiffusionPipeline):
 
                 unet_inputs = {
                     'x': latent_model_input,
-                    'timesteps': torch.tensor([t] * actual_num_frames * multiplier, dtype=latent_model_input.dtype, device=device),
+                    'timesteps': torch.tensor([t] * actual_num_frames * multiplier * 2, dtype=latent_model_input.dtype, device=device),
                     'context': text_embeddings,
                     'num_frames': actual_num_frames,
-                    'camera': torch.cat([self.camera] * multiplier),
+                    'camera': torch.cat([self.camera] * multiplier * 2),
                 }
                 if i==0:
                     print("inversion_shape:")
@@ -857,6 +857,7 @@ class MVDreamPipeline(DiffusionPipeline):
                 model_inputs = torch.cat([latents] * 2)
             else:
                 model_inputs = latents
+                multiplier = 1
 
             latent_model_input = torch.cat([latents] * multiplier)
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
