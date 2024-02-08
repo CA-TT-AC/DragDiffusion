@@ -35,7 +35,6 @@ def point_tracking(F0,
             for j in range(F0.shape[0]):
                 f0.append(F0[j,:,int(pi0[j,0]),int(pi0[j,1])])
             f0 = torch.stack(f0, dim=0)
-            print(f0.shape)
             r1, r2 = torch.max(torch.zeros(4), pi[:,0].long()-args.r_p).long(), torch.min(torch.full_like(pi[:,0], max_r),pi[:,0].long()+args.r_p+1).long()
             c1, c2 = torch.max(torch.zeros(4) ,pi[:,1].long()-args.r_p).long(), torch.min(torch.full_like(pi[:, 1], max_c), pi[:,1].long()+args.r_p+1).long()
             # F1_neighbor = F1[:, :, r1:r2, c1:c2]
@@ -128,7 +127,7 @@ def drag_diffusion_update(model,
             # do point tracking to update handle points before computing motion supervision loss
             if step_idx != 0:
                 handle_points = point_tracking(F0, F1, handle_points, handle_points_init, args)
-                print('new handle points', handle_points)
+                # print('new handle points', handle_points)
 
             # break if all handle points have reached the targets
             if check_handle_reach_target(handle_points, target_points):

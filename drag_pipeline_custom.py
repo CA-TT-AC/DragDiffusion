@@ -669,7 +669,7 @@ class MVDreamPipeline(DiffusionPipeline):
                     'camera': torch.cat([self.camera] * multiplier * 2),
                 }
                 if i==0:
-                    print("inversion_shape:")
+                    print("sampling_shape:")
                     print('x:',unet_inputs['x'].shape)
                     print("timesteps:", unet_inputs['timesteps'].shape)
                     print("text:", text_embeddings.shape)
@@ -861,7 +861,7 @@ class MVDreamPipeline(DiffusionPipeline):
 
             latent_model_input = torch.cat([latents] * multiplier)
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-            self.camera = get_camera(4, elevation=15, extra_view=False).to(dtype=latents.dtype, device=DEVICE)
+            
             if i==0:
                 print("inversion_shape:")
                 print(latent_model_input.shape)
