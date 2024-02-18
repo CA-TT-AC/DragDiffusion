@@ -87,12 +87,10 @@ class MutualSelfAttentionControl(AttentionBase):
         """
         Attention forward function
         """
-        # print("new attention forward:", is_cross, self.cur_step, self.cur_att_layer)
         # if is_cross or self.cur_step not in self.step_idx or self.cur_att_layer // 2 not in self.layer_idx:
-        # if is_cross or self.cur_step not in self.step_idx:
         if is_cross or self.cur_att_layer // 2 not in self.layer_idx:
             return super().forward(q, k, v, is_cross, place_in_unet, num_heads, attention_op, **kwargs)
-        print("new attention forward:", is_cross, self.cur_step, self.cur_att_layer)
+        # print("new attention forward:", is_cross, self.cur_step, self.cur_att_layer)
         if self.guidance_scale > 1.0:
             qu, qc = q[0:2], q[2:4]
             ku, kc = k[0:2], k[2:4]
@@ -112,8 +110,8 @@ class MutualSelfAttentionControl(AttentionBase):
 
             out = torch.cat([out_u, out_c], dim=0)
         else:
-            b = q.shape[0]
-            print("q.shape 0:", q.shape)
+            # b = q.shape[0]
+            # print("q.shape 0:", q.shape)
             # q = torch.cat([q[0:1], q[1:2]], dim=2)
             # out = F.scaled_dot_product_attention(q, k[0:b//2], v[0:b//2], attn_mask=None, dropout_p=0.0, is_causal=False)
             # out = torch.cat(out.chunk(2, dim=2), dim=0) # split the queries into source and target batch
@@ -273,6 +271,22 @@ def override_mvdream_attn_forward(attn, editor, place_in_unet):
         return attn.to_out(out)
     return forward
 
+def override_mvdream_lora_attn_forward(attn, editor, place_in_unet, scale=1.0):
+    def forward(x, context=None):
+        q = attn.to_q(x) + scale * attn.to_q_lora(x)
+        is_cross = context is not None
+        context = default(context, x)
+        k = attn.to_k(context) + scale * attn.to_k_lora(context)
+        v = attn.to_v(context) + scale * attn.to_v_lora(context)
+
+        out = editor(
+            q, k, v, is_cross, place_in_unet,
+            attn.heads, attn.attention_op)
+        
+        return attn.to_out(out) + scale * attn.to_out_lora(out)
+    return forward
+
+
 def register_attention_editor_diffusers(model, editor: AttentionBase, attn_processor='attn_proc'):
     """
     Register a attention editor to Diffuser Pipeline, refer from [Prompt-to-Prompt]
@@ -280,8 +294,7 @@ def register_attention_editor_diffusers(model, editor: AttentionBase, attn_proce
     def register_editor(net, count, place_in_unet):
         for name, subnet in net.named_children():
             # here modified
-            
-            if net.__class__.__name__ == 'Attention' or net.__class__.__name__ == 'MemoryEfficientCrossAttention':  # spatial Transformer layer
+            if 'Attention' in net.__class__.__name__:  # spatial Transformer layer
                 print("Successfully share KV!")
                 if attn_processor == 'attn_proc':
                     net.forward = override_attn_proc_forward(net, editor, place_in_unet)
@@ -289,6 +302,8 @@ def register_attention_editor_diffusers(model, editor: AttentionBase, attn_proce
                     net.forward = override_lora_attn_proc_forward(net, editor, place_in_unet)
                 elif attn_processor == 'attn_mv':
                     net.forward = override_mvdream_attn_forward(net, editor, place_in_unet)
+                elif attn_processor == 'lora_attn_mv':
+                    net.forward = override_mvdream_lora_attn_forward(net, editor, place_in_unet)
                 else:
                     raise NotImplementedError("not implemented")
                 return count + 1

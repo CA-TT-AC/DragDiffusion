@@ -1,8 +1,9 @@
 import math
 import numpy as np
 from inspect import isfunction
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Dict, Union
 
+from diffusers.models.attention_processor import AttentionProcessor, AttnProcessor
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -107,6 +108,35 @@ def default(val, d):
         return val
     return d() if isfunction(d) else d
 
+class LoRALinearLayer(nn.Module):
+    def __init__(self, in_features, out_features, rank=4, network_alpha=None):
+        super().__init__()
+
+        if rank > min(in_features, out_features):
+            raise ValueError(f"LoRA rank {rank} must be less or equal than {min(in_features, out_features)}")
+
+        self.down = nn.Linear(in_features, rank, bias=False)
+        self.up = nn.Linear(rank, out_features, bias=False)
+        # This value has the same meaning as the `--network_alpha` option in the kohya-ss trainer script.
+        # See https://github.com/darkstorm2150/sd-scripts/blob/main/docs/train_network_README-en.md#execute-learning
+        self.network_alpha = network_alpha
+        self.rank = rank
+
+        nn.init.normal_(self.down.weight, std=1 / rank)
+        nn.init.zeros_(self.up.weight)
+
+    def forward(self, hidden_states):
+        orig_dtype = hidden_states.dtype
+        dtype = self.down.weight.dtype
+
+        down_hidden_states = self.down(hidden_states.to(dtype))
+        up_hidden_states = self.up(down_hidden_states)
+
+        if self.network_alpha is not None:
+            up_hidden_states *= self.network_alpha / self.rank
+
+        return up_hidden_states.to(orig_dtype)
+
 
 class GEGLU(nn.Module):
     def __init__(self, dim_in, dim_out):
@@ -135,6 +165,103 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+class LoRAMemoryEfficientCrossAttention(nn.Module):
+    def __init__(
+            self, 
+            query_dim, 
+            rank=4,
+            network_alpha=None,
+            context_dim=None, 
+            heads=8, 
+            dim_head=64, 
+            dropout=0.0,
+            ip_dim=0,
+            ip_weight=1,
+        ):
+        super().__init__()
+        
+        inner_dim = dim_head * heads
+        context_dim = default(context_dim, query_dim)
+
+        self.heads = heads
+        self.dim_head = dim_head
+
+        self.ip_dim = ip_dim
+        self.ip_weight = ip_weight
+
+        if self.ip_dim > 0:
+            self.to_k_ip = nn.Linear(context_dim, inner_dim, bias=False)
+            self.to_v_ip = nn.Linear(context_dim, inner_dim, bias=False)
+
+        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
+        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, query_dim), nn.Dropout(dropout)
+        )
+        self.attention_op: Optional[Any] = None
+        hidden_size = query_dim
+        self.to_q_lora = LoRALinearLayer(hidden_size, hidden_size, rank, network_alpha)
+        self.to_k_lora = LoRALinearLayer(context_dim or hidden_size, hidden_size, rank, network_alpha)
+        self.to_v_lora = LoRALinearLayer(context_dim or hidden_size, hidden_size, rank, network_alpha)
+        self.to_out_lora = LoRALinearLayer(hidden_size, hidden_size, rank, network_alpha)
+        
+        
+    def forward(self, x, context=None, scale=1.0):
+        q = self.to_q(x) + scale * self.to_q_lora(x)
+        context = default(context, x)
+
+        if self.ip_dim > 0:
+            # context： [B, 77 + 16(ip), 1024]
+            token_len = context.shape[1]
+            context_ip = context[:, -self.ip_dim :, :]
+            k_ip = self.to_k_ip(context_ip)
+            v_ip = self.to_v_ip(context_ip)
+            context = context[:, : (token_len - self.ip_dim), :]
+
+        k = self.to_k(context) + scale * self.to_k_lora(context)
+        v = self.to_v(context) + scale * self.to_v_lora(context)
+
+        b, _, _ = q.shape
+        q, k, v = map(
+            lambda t: t.unsqueeze(3)
+            .reshape(b, t.shape[1], self.heads, self.dim_head)
+            .permute(0, 2, 1, 3)
+            .reshape(b * self.heads, t.shape[1], self.dim_head)
+            .contiguous(),
+            (q, k, v),
+        )
+
+        # actually compute the attention, what we cannot get enough of
+        out = xformers.ops.memory_efficient_attention(
+            q, k, v, attn_bias=None, op=self.attention_op
+        ) 
+
+        if self.ip_dim > 0:
+            k_ip, v_ip = map(
+                lambda t: t.unsqueeze(3)
+                .reshape(b, t.shape[1], self.heads, self.dim_head)
+                .permute(0, 2, 1, 3)
+                .reshape(b * self.heads, t.shape[1], self.dim_head)
+                .contiguous(),
+                (k_ip, v_ip),
+            )
+            # actually compute the attention, what we cannot get enough of
+            out_ip = xformers.ops.memory_efficient_attention(
+                q, k_ip, v_ip, attn_bias=None, op=self.attention_op
+            )
+            out = out + self.ip_weight * out_ip
+
+        out = (
+            out.unsqueeze(0)
+            .reshape(b, self.heads, out.shape[1], self.dim_head)
+            .permute(0, 2, 1, 3)
+            .reshape(b, out.shape[1], self.heads * self.dim_head)
+        )
+        return self.to_out(out) + scale * self.to_out_lora(out)
 
 
 class MemoryEfficientCrossAttention(nn.Module):
@@ -172,7 +299,8 @@ class MemoryEfficientCrossAttention(nn.Module):
             nn.Linear(inner_dim, query_dim), nn.Dropout(dropout)
         )
         self.attention_op: Optional[Any] = None
-
+        
+        
     def forward(self, x, context=None):
         q = self.to_q(x)
         context = default(context, x)
@@ -940,6 +1068,62 @@ class MultiViewUNetModel(ModelMixin, ConfigMixin):
                 conv_nd(dims, model_channels, n_embed, 1),
                 # nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
             )
+
+    # @property
+    def attn_processors(self) -> Dict[str, AttentionProcessor]:
+        r"""
+        Returns:
+            `dict` of attention processors: A dictionary containing all attention processors used in the model with
+            indexed by its weight name.
+        """
+        # set recursively
+        processors = {}
+
+        def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttentionProcessor]):
+            if hasattr(module, "set_processor"):
+                processors[f"{name}.processor"] = module.processor
+
+            for sub_name, child in module.named_children():
+                fn_recursive_add_processors(f"{name}.{sub_name}", child, processors)
+
+            return processors
+
+        for name, module in self.named_children():
+            fn_recursive_add_processors(name, module, processors)
+
+        return processors
+
+    def set_attn_processor(self, processor: Union[AttentionProcessor, Dict[str, AttentionProcessor]]):
+        r"""
+        Parameters:
+            `processor (`dict` of `AttentionProcessor` or `AttentionProcessor`):
+                The instantiated processor class or a dictionary of processor classes that will be set as the processor
+                of **all** `Attention` layers.
+            In case `processor` is a dict, the key needs to define the path to the corresponding cross attention processor. This is strongly recommended when setting trainable attention processors.:
+
+        """
+        count = len(self.attn_processors.keys())
+
+        if isinstance(processor, dict) and len(processor) != count:
+            raise ValueError(
+                f"A dict of processors was passed, but the number of processors {len(processor)} does not match the"
+                f" number of attention layers: {count}. Please make sure to pass {count} processor classes."
+            )
+
+        def fn_recursive_attn_processor(name: str, module: torch.nn.Module, processor):
+            if hasattr(module, "set_processor"):
+                if not isinstance(processor, dict):
+                    module.set_processor(processor)
+                else:
+                    module.set_processor(processor.pop(f"{name}.processor"))
+
+            for sub_name, child in module.named_children():
+                fn_recursive_attn_processor(f"{name}.{sub_name}", child, processor)
+
+        for name, module in self.named_children():
+            fn_recursive_attn_processor(name, module, processor)
+
+
 
     def forward(
         self,
