@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 from types import SimpleNamespace
@@ -9,7 +10,7 @@ from copy import deepcopy
 import torch.nn.functional as F
 from tqdm import tqdm
 from utils.mvdream2diffuser import convert_from_original_mvdream_ckpt
-from utils.custom_utils import drag_diffusion_update, drag_diffusion_update_gen
+from utils.custom_utils import drag_diffusion_update, drag_diffusion_update_gen, load_and_preprocess_images
 from utils.custom_attn_utils import register_attention_editor_diffusers, MutualSelfAttentionControl
 from utils.mv_unet import LoRAMemoryEfficientCrossAttention
 import matplotlib.pyplot as plt
@@ -21,52 +22,43 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed
 from torchvision import transforms
 
-def preprocess_image(image, device, dtype=torch.float32):
-    image = torch.from_numpy(image).float() / 127.5 - 1 # [-1, 1]
-    image = rearrange(image, "h w c -> 1 c h w")
-    image = image.to(device, dtype)
-    return image
 
-def load_and_preprocess_images(folder_path, device):
-    processed_images = []
-    filenames = os.listdir(folder_path)
-    filenames.sort()
-    imgname2idx = {}
-    cnt = 1
-    for i, filename in enumerate(filenames):
-        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif')):
-            imgname2idx[filename.split('.')[0]] = cnt
-            cnt += 1
-            print(filename+" loaded!")
-            image_path = os.path.join(folder_path, filename)
-            image = Image.open(image_path)
-            image_np = np.array(image)
-            processed_image = preprocess_image(image_np, device)
-            processed_images.append(processed_image)
-    processed_images = torch.concat(processed_images, dim=0)
-    processed_images = processed_images[:, :3, :, :]
-    return processed_images, imgname2idx
+parser = argparse.ArgumentParser(description='User given params')
 
-# Example usage
-folder_path = '/data22/DISCOVER_summer2023/shenst2306/drag_diff2/DragDiffusion/data/duijie_test'
-ckpt_dir = '/data22/DISCOVER_summer2023/shenst2306/.cache/huggingface/hub/models--MVDream--MVDream/snapshots/d14ac9d78c48c266005729f2d5633f6c265da467/sd-v2.1-base-4view.pt'
-config_dir = '/data22/DISCOVER_summer2023/shenst2306/drag_diff2/MVDream/mvdream/configs/sd-v2-base.yaml'
+parser.add_argument("--folder_path", default='/data22/DISCOVER_summer2023/shenst2306/drag_diff2/DragDiffusion/data/lego_test', help='folder path where images, masks and camera poses are saved')
+parser.add_argument("--ckpt_dir", default='/data22/DISCOVER_summer2023/shenst2306/.cache/huggingface/hub/models--MVDream--MVDream/snapshots/d14ac9d78c48c266005729f2d5633f6c265da467/sd-v2.1-base-4view.pt', help="checkpoint dir")
+parser.add_argument("--config_dir", default='/data22/DISCOVER_summer2023/shenst2306/drag_diff2/MVDream/mvdream/configs/sd-v2-base.yaml', help="MVdream config dir")
+parser.add_argument("--is_mask_given", default=False, help="whether masks.json is given")
+parser.add_argument("--is_camera_given", default=True, help="whether camera_pose.json is given")
+parser.add_argument("--is_lora", default=True, help="whether use lora finetune")
+parser.add_argument("--prompt", default='a green chair', help="prompt of MVdream model")
+parser.add_argument("--lora_lr", default=0.0005, help="lora learning rate")
+parser.add_argument("--lora_step", default=300, type=int, help="step number of lora finetuning")
 
-mask_dir = '/data22/DISCOVER_summer2023/shenst2306/drag_diff2/DragDiffusion/data/duijie_test/masks.json'
-# mask_dir = None
-device = 'cuda'
-# prompt = 'Head of Hatsune Miku'
-prompt = 'a green chair'
-is_camera_given = True
-is_lora = True
+args = parser.parse_args()
+
+# handle_points = torch.tensor([[[60.,53.]],[[125., 44.]],[[195.,45.]],[[128.,60.]]]) 
+# target_points = torch.tensor([[[45.,31.]],[[125., 28.]],[[211.,34.]],[[128.,40.]]]) 
+# handle_points = torch.tensor([[[390, 154]],[[227,127]],[[360, 123]],[[560, 110]]]).float() / 2
+# target_points = torch.tensor([[[390, 84]],[[227, 61]],[[360, 62]],[[560, 34]]]) .float() / 2
+# target_points = torch.tensor([[[390, 250]],[[227, 200]],[[360, 200]],[[560, 200]]]) .float() / 2
+# handle_points = torch.tensor([[[230, 130]], [[564, 208]], [[388, 146]], [[362, 120]]]).float() / 2
+# target_points = torch.tensor([[[274, 296]],[[515, 279]],[[399, 354]],[[358, 280]]]) .float() / 2
+
+# lego:
+handle_points = torch.tensor([[[630, 235], [600, 264], [617, 244], [664, 221]], [[190, 235], [135, 255], [148, 231], [214, 250]], [[148, 229], [213, 189], [204, 209], [136, 240]], [[650, 217], [653, 226], [641, 219], [576, 214]]]).float() / 2
+target_points = torch.tensor([[[630, 427], [600, 388], [617, 381], [664, 363]],[[190, 427], [135, 360], [148, 379], [214, 391]],[[148, 421], [213, 332], [204, 346], [136, 353]],[[650, 409], [653, 374], [641, 356], [576, 350]]]) .float() / 2
+
+if args.is_mask_given:
+    mask_dir = os.path.join(args.folder_path, 'masks.json')
+else:
+    mask_dir = None
 
 inversion_strength = 1.0
 latent_lr = 0.01
 n_pix_step = 80
 lam = 0.1
-args = SimpleNamespace()
-args.prompt = prompt
-# args.points = points
+
 args.n_inference_step = 50
 args.n_actual_inference_step = round(inversion_strength * args.n_inference_step)
 args.guidance_scale = 1
@@ -82,7 +74,7 @@ args.n_pix_step = n_pix_step
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-source_images, imgname2idx = load_and_preprocess_images(folder_path, device)
+source_images, imgname2idx = load_and_preprocess_images(args.folder_path, device)
 print("shape of input image:", source_images.shape)
 full_h, full_w = source_images.shape[-2:]
 args.sup_res_h = full_h
@@ -92,19 +84,16 @@ args.sup_res_w = int(0.5*full_w)
 start_step = 0
 start_layer = 8
 
-
-lora_lr = 0.0005
-lora_step = 100
 # it has to be
 lora_batch_size = 1
 
 # processed_images is a list of tensors with shape n c h w
-model = convert_from_original_mvdream_ckpt(ckpt_dir, config_dir, device)
+model = convert_from_original_mvdream_ckpt(args.ckpt_dir, args.config_dir, device)
 
-if not is_camera_given:
+if not args.is_camera_given:
     model.camera = get_camera(4, elevation=15, extra_view=False).to(dtype=source_images.dtype, device=device)
 else:
-    f = open(os.path.join(folder_path, 'camera_pose.json'), 'r')
+    f = open(os.path.join(args.folder_path, 'camera_pose.json'), 'r')
     content = f.read()
     data = json.loads(content)['frames']
     infor_needed = []
@@ -124,9 +113,9 @@ def print_param_stats(model, layer_name):
             print(f'{name}: mean={param.data.mean()}, std={param.data.std()}')
 
 # obtain text embeddings
-text_embeddings = model._encode_prompt(prompt, device=device, num_images_per_prompt=4, do_classifier_free_guidance=args.guidance_scale>1.)
+text_embeddings = model._encode_prompt(args.prompt, device=device, num_images_per_prompt=4, do_classifier_free_guidance=args.guidance_scale>1.)
 
-if is_lora:
+if args.is_lora:
     modified_unet = deepcopy(model.unet)
     # initialize UNet LoRA
     for name, module in model.unet.named_modules():
@@ -176,7 +165,7 @@ if is_lora:
             # print(name)
     optimizer = torch.optim.AdamW(
         lora_parameters,
-        lr=lora_lr,
+        lr=args.lora_lr,
         betas=(0.9, 0.999),
         weight_decay=1e-2,
         eps=1e-08,
@@ -185,7 +174,7 @@ if is_lora:
         "constant",
         optimizer=optimizer,
         num_warmup_steps=0,
-        num_training_steps=lora_step,
+        num_training_steps=args.lora_step,
         num_cycles=1,
         power=1.0,
     )
@@ -209,7 +198,7 @@ if is_lora:
         ]
     )
     noise_scheduler = model.scheduler
-    for step in tqdm(range(lora_step), desc="training LoRA"):
+    for step in tqdm(range(args.lora_step), desc="training LoRA"):
         model.unet.train()
         # image_batch = []
         # for _ in range(lora_batch_size):
@@ -275,12 +264,10 @@ print("start pipeline~")
 
 
 
-
-
 # invert the source image
 # the latent code resolution is too small, only 64*64
 invert_code = model.invert(source_images,
-                        prompt,
+                        args.prompt,
                         text_embeddings=text_embeddings,
                         guidance_scale=args.guidance_scale,
                         num_inference_steps=args.n_inference_step,
@@ -326,21 +313,14 @@ if mask_dir is not None:
         
         
     mask = 1 - torch.tensor(masks)
-    print(mask)
-    # print(mask.shape)
+    # print(mask)
     mask = rearrange(mask, "n h w -> n 1 h w").float().cuda()
 else:
     mask = torch.ones_like(source_images[0, 0, :, :])
     mask = rearrange(mask, "h w -> 1 1 h w").cuda()
 
 
-# handle_points = torch.tensor([[[60.,53.]],[[125., 44.]],[[195.,45.]],[[128.,60.]]]) 
-# target_points = torch.tensor([[[45.,31.]],[[125., 28.]],[[211.,34.]],[[128.,40.]]]) 
-# handle_points = torch.tensor([[[390, 154]],[[227,127]],[[360, 123]],[[560, 110]]]).float() / 2
-# target_points = torch.tensor([[[390, 84]],[[227, 61]],[[360, 62]],[[560, 34]]]) .float() / 2
-# target_points = torch.tensor([[[390, 250]],[[227, 200]],[[360, 200]],[[560, 200]]]) .float() / 2
-handle_points = torch.tensor([[[230, 130]], [[564, 208]], [[388, 146]], [[362, 120]]]).float() / 2
-target_points = torch.tensor([[[274, 296]],[[515, 279]],[[399, 354]],[[358, 280]]]) .float() / 2
+
 updated_init_code = drag_diffusion_update(model, init_code,
     text_embeddings, t, handle_points, target_points, mask, args)
 # updated_init_code = init_code
@@ -356,7 +336,7 @@ editor = MutualSelfAttentionControl(start_step=start_step,
                                     start_layer=start_layer,
                                     total_steps=args.n_inference_step,
                                     guidance_scale=args.guidance_scale)
-if is_lora:
+if args.is_lora:
     register_attention_editor_diffusers(model, editor, attn_processor='lora_attn_mv')
 else:
     register_attention_editor_diffusers(model, editor, attn_processor='attn_mv')
